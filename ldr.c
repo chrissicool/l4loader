@@ -166,13 +166,17 @@ int main(int argc, char **argv)
 		}
 	}
 
-	entry = (void *)ehdr->e_entry;
-	printf("Starting binary at %p, argc=%d argv0=%s\n", entry, argc, *argv);
-	//printf("%x %x %x %x %x\n", *((char *)entry + 0), *((char *)entry + 1), *((char *)entry + 2), *((char *)entry + 3), *((char *)entry + 4));
 	exchg.external_resolver = __l4_external_resolver;
 	exchg.l4re_global_env  = l4re_global_env;
 	exchg.kip              = l4re_kip();
 	printf("External resolver is at %p\n", __l4_external_resolver);
+	entry = (void *)ehdr->e_entry;
+	printf("Starting binary at %p, argc=%d argv0=%s\n", entry, argc, *argv);
+	/*
+	printf("Hexdump of binary: %02x %02x %02x %02x %02x\n",
+		*((char *)entry + 0), *((char *)entry + 1), *((char *)entry + 2),
+		*((char *)entry + 3), *((char *)entry + 4));
+	 */
 #ifdef ARCH_arm
 	{
 		register unsigned long _argc  asm("r0") = argc;

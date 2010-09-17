@@ -34,8 +34,9 @@ L4_CV l4_utcb_t *l4_utcb_wrap(void)
 }
 
 
-
-
+/*
+ * exit function on errors inside the VM.
+ */
 void l4x_external_exit(int code);
 void l4x_external_exit(int code)
 {

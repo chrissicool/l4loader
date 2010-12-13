@@ -89,6 +89,6 @@ l4bsd: $(OBJS)
 	  -T$(L4_LDS_stat_bin)
 
 clean:
-	rm -f l4bsd *.o func_list.h
+	rm -f l4bsd *.o func_list.h*
 
 .PHONY: l4bsd clean all

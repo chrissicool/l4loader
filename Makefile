@@ -82,8 +82,6 @@ l4bsd: $(OBJS)
 	  --start-group $(L4LIBS) $(L4_GCCLIB) --end-group \
 	  $(L4_CRTN_STATIC) \
 	  -Ttext=0xa8000000 \
-	  --defsym __L4_STACK_ADDR__=$(L4_BID_STACK_ADDR) \
-	  --defsym __L4_KIP_ADDR__=$(L4_BID_KIP_ADDR) \
           --defsym __l4sys_invoke_direct=$(L4_BID_KIP_ADDR)+$(L4_BID_KIP_OFFS_SYS_INVOKE) \
           --defsym __l4sys_debugger_direct=$(L4_BID_KIP_ADDR)+$(L4_BID_KIP_OFFS_SYS_DEBUGGER) \
 	  -T$(L4_LDS_stat_bin)

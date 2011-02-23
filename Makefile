@@ -21,7 +21,7 @@ endif
 include $(L4OBJ)/l4defs.mk.inc
 
 L4_REQUIRED_MODS := stdlibs log l4re_c-util \
-                    libio shmc rtc
+                    libio shmc rtc libvcpu
 
 L4_EXT_LIBS := $(call L4_BID_PKG_CONFIG_CALL,$(L4OBJ),--libs --define-variable=libc_variant=libc,$(L4_REQUIRED_MODS))
 

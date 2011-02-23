@@ -78,9 +78,11 @@ int main(int argc, char **argv)
 
 		ElfW(Phdr) *ph = (ElfW(Phdr)*)((l4_addr_t)l4util_elf_phdr(ehdr)
 		                               + i * ehdr->e_phentsize);
-		printf("PH %d (type: %d): off=%08x, filesize=%08x, memsize=%08x, flags=%c%c%c\n",
-		       i, ph->p_type, ph->p_offset, ph->p_filesz,
-		       ph->p_memsz,
+		printf("PH %2d (t: %8d) offs=%08x vaddr=%08x vend=%08x\n"
+		       "                    f_sz=%08x memsz=%08x flgs=%c%c%c\n",
+		       i, ph->p_type, ph->p_offset, ph->p_vaddr,
+		       ph->p_vaddr + ph->p_memsz,
+		       ph->p_filesz, ph->p_memsz,
 		       ph->p_flags & PF_R ? 'r' : '-',
 		       ph->p_flags & PF_W ? 'w' : '-',
 		       ph->p_flags & PF_X ? 'x' : '-');
@@ -177,7 +179,7 @@ int main(int argc, char **argv)
 	printf("Hexdump of binary: %02x %02x %02x %02x %02x\n",
 		*((char *)entry + 0), *((char *)entry + 1), *((char *)entry + 2),
 		*((char *)entry + 3), *((char *)entry + 4));
-	 */
+	*/
 #ifdef ARCH_arm
 	{
 		register unsigned long _argc  asm("r0") = argc;

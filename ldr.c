@@ -50,10 +50,18 @@ void do_resolve_error(const char *funcname)
 	enter_kdebug("Symbol not found!");
 }
 
+/*
+ * XXX hshoexer: Aren't we leaking caps and dataspaces in error paths?
+ */
 int main(int argc, char **argv)
 {
 	ElfW(Ehdr) *ehdr = (void *)image_bsd_start;
-	int i;
+	ElfW(Ehdr) *elfp;
+	ElfW(Shdr) *shp, *shpp;
+	ElfW(Off) off;
+	l4_addr_t minp = ~0, maxp = 0, pos = 0;
+	size_t sz;
+	int i, j, havesyms;
 	int (*entry)(int, char **);
 
 	if (!l4util_elf_check_magic(ehdr)
@@ -94,6 +102,16 @@ int main(int argc, char **argv)
 			continue;
 		}
 
+		pos = ph->p_paddr;
+		if (minp > pos)
+			minp = pos;
+		pos += ph->p_filesz;
+		if (maxp < pos)
+			maxp = pos;
+
+		printf("maxp 0x%lx pos 0x%lx\n", (unsigned long)maxp,
+		    (unsigned long)pos);
+		
 		if (ph->p_filesz < ph->p_memsz) {
 
 			ds = l4re_util_cap_alloc();
@@ -115,6 +133,9 @@ int main(int argc, char **argv)
 				printf("ldr: failed attaching memory\n");
 				return 1;
 			}
+			printf("mapped %zu bytes at 0x%lx (0x%lx)\n",
+			    ph->p_memsz, (unsigned long)ph->p_vaddr,
+			    (unsigned long)ph->p_vaddr + ph->p_memsz);
 #if 1
 			printf("Copy segment: %p -> %p (%x), zero out %p (%x)\n",
 			(void *)ph->p_vaddr,
@@ -128,6 +149,9 @@ int main(int argc, char **argv)
 			       ph->p_filesz);
 			memset((void *)ph->p_vaddr + ph->p_filesz, 0,
 			       ph->p_memsz - ph->p_filesz);
+			pos += ph->p_memsz - ph->p_filesz;
+			if (maxp < pos)
+				maxp = pos;
 			continue;
 		}
 
@@ -167,7 +191,170 @@ int main(int argc, char **argv)
 			printf("ldr: failed to attach section\n");
 			return 1;
 		}
+		printf("mapped %zu bytes at 0x%lx (0x%lx)\n", ph->p_memsz,
+		    map_addr, (unsigned long)map_addr + ph->p_memsz);
 	}
+
+	printf("maxp 0x%lx\n", (unsigned long)maxp);
+
+	/* 
+	 * Copy ELF and section headers.
+	 */
+#define roundup(x, y)	((((x)+((y)-1))/(y))*(y))
+
+	/* Will store the ELF header at elfp. */
+	maxp = roundup(maxp, 4096/*sizeof(ElfW(Addr))*/);
+	elfp = (ElfW(Ehdr) *)maxp;
+	sz = ehdr->e_shnum * sizeof(ElfW(Shdr)) + sizeof(ElfW(Ehdr));
+	maxp += sizeof(ElfW(Ehdr));
+
+	printf("elfp %p maxp 0x%lx\n", elfp, (unsigned long)maxp);
+
+	shpp = (ElfW(Shdr)*)maxp;
+	maxp += sz;
+	maxp = roundup(maxp, 4096);
+
+	printf("shpp 0x%lx sz %zu maxp 0x%lx\n", (unsigned long)shpp, sz,
+	    (unsigned long)maxp);
+
+	l4re_ds_t ds;
+	l4_addr_t map_addr;
+
+	/* Create chunk of memory for section headers. */
+	ds = l4re_util_cap_alloc();
+	if (l4_is_invalid_cap(ds)) {
+		printf("ldr: out of caps\n");
+		return 1;
+	}
+
+	if (l4re_ma_alloc(sz, ds, L4RE_MA_CONTINUOUS | L4RE_MA_PINNED)) {
+		printf("ldr: could not allocate memory\n");
+		return 1;
+	}
+
+	map_addr = (l4_addr_t)shpp;
+	if ((i = l4re_rm_attach((void **)&map_addr, sz,  L4RE_RM_EAGER_MAP, ds,
+	    0, 0)) != 0) {
+		printf("ldr: failed attaching memory %d\n", i);
+		return 1;
+	}
+	printf("mapped %zu bytes at 0x%lx (0x%lx)\n", sz, map_addr,
+	    (unsigned long)map_addr + sz);
+
+	off = roundup((sizeof(ElfW(Ehdr)) + sz), sizeof(ElfW(Addr)));
+
+	printf("off 0x%lx\n", (unsigned long)off);
+
+	shp = (ElfW(Shdr)*)((l4_addr_t)image_bsd_start + ehdr->e_shoff);
+	for (havesyms = i = 0; i < ehdr->e_shnum; i++) {
+		printf("shp[%d] 0x%lx\n", i, (unsigned long)&shp[i]);
+		if (shp[i].sh_type == SHT_SYMTAB)
+			havesyms = 1;
+	}
+
+	for (j = i = 0; i < ehdr->e_shnum; i++) {
+		if (shp[i].sh_type == SHT_SYMTAB ||
+		    shp[i].sh_type == SHT_STRTAB) {
+			if (!havesyms)
+				continue;
+
+			printf("loading section \"%s\" size %ld to 0x%lx\n",
+			    shp[i].sh_type == SHT_SYMTAB ? "symbols" :
+			    "strings", (unsigned long)shp[i].sh_size,
+			    (unsigned long)maxp);
+		} else
+			continue;
+
+		/* Create chunk of memory at maxp. */
+		ds = l4re_util_cap_alloc();
+		if (l4_is_invalid_cap(ds)) {
+			printf("ldr: out of caps\n");
+			return 1;
+		}
+
+		if (l4re_ma_alloc(shp[i].sh_size, ds,
+		    L4RE_MA_CONTINUOUS | L4RE_MA_PINNED)) {
+			printf("ldr: could not allocate memory\n");
+			return 1;
+		}
+
+		map_addr = maxp;
+		if (l4re_rm_attach((void **)&map_addr, shp[i].sh_size,
+		    L4RE_RM_EAGER_MAP, ds, 0, 0)) {
+			printf("ldr: failed attaching memory\n");
+			return 1;
+		}
+		printf("mapped %zu bytes at 0x%lx (0x%lx)\n", shp[i].sh_size,
+		    map_addr, (unsigned long)map_addr + shp[i].sh_size);
+		printf("size %zu offset 0x%lx source 0x%lx image 0x%lx\n",
+		    shp[i].sh_size, (unsigned long)shp[i].sh_offset,
+		    (l4_addr_t)image_bsd_start + shp[i].sh_offset,
+		    (l4_addr_t)image_bsd_start);
+
+		/* Pull in section. */
+		memcpy((void *)maxp, (void *)((l4_addr_t)image_bsd_start +
+		    shp[i].sh_offset), shp[i].sh_size);
+
+		maxp += roundup(shp[i].sh_size, sizeof(ElfW(Addr)));
+		maxp = roundup(maxp, 4096);
+
+		printf("section %d: %lx %lx %lx %lx %lx %lx %lx %lx %lx %lx\n",
+		    i,
+		    (unsigned long)shp[i].sh_name,
+		    (unsigned long)shp[i].sh_type,
+		    (unsigned long)shp[i].sh_flags,
+		    (unsigned long)shp[i].sh_addr,
+		    (unsigned long)shp[i].sh_offset,
+		    (unsigned long)shp[i].sh_size,
+		    (unsigned long)shp[i].sh_link,
+		    (unsigned long)shp[i].sh_info,
+		    (unsigned long)shp[i].sh_addralign,
+		    (unsigned long)shp[i].sh_entsize);
+
+		/* Patch in new values. */
+		shpp[j] = shp[i];
+		shpp[j].sh_offset = off;
+		j++;
+		off += roundup(shp[i].sh_size, sizeof(ElfW(Addr)));
+
+		printf("maxp 0x%lx off %lx\n", (unsigned long)maxp,
+		    (unsigned long)off);
+	}
+
+	for (i = 0; i < j; i++) {
+		printf("section %d: %lx %lx %lx %lx %lx %lx %lx %lx %lx %lx\n",
+		    i,
+		    (unsigned long)shpp[i].sh_name,
+		    (unsigned long)shpp[i].sh_type,
+		    (unsigned long)shpp[i].sh_flags,
+		    (unsigned long)shpp[i].sh_addr,
+		    (unsigned long)shpp[i].sh_offset,
+		    (unsigned long)shpp[i].sh_size,
+		    (unsigned long)shpp[i].sh_link,
+		    (unsigned long)shpp[i].sh_info,
+		    (unsigned long)shpp[i].sh_addralign,
+		    (unsigned long)shpp[i].sh_entsize);
+	}
+
+	/* Patch ELF header. */
+	*elfp = *ehdr;
+	elfp->e_phoff = 0;
+	elfp->e_shoff = sizeof(ElfW(Ehdr));
+	elfp->e_phentsize = 0;
+	elfp->e_phnum = 0;
+
+	printf("ELF: %hx %hx %lx %lx %lx %lx %lx %hx %hx %hx %hx %hx %hx\n",
+	    ehdr->e_type, ehdr->e_machine,
+	    (unsigned long)ehdr->e_version, (unsigned long)ehdr->e_entry,
+	    (unsigned long)ehdr->e_phoff, (unsigned long)ehdr->e_shoff,
+	    (unsigned long)ehdr->e_flags, ehdr->e_ehsize, ehdr->e_phentsize,
+	    ehdr->e_phnum, ehdr->e_shentsize, ehdr->e_shnum, ehdr->e_shstrndx);
+	printf("ELF: %hx %hx %lx %lx %lx %lx %lx %hx %hx %hx %hx %hx %hx\n",
+	    elfp->e_type, elfp->e_machine,
+	    (unsigned long)elfp->e_version, (unsigned long)elfp->e_entry,
+	    (unsigned long)elfp->e_phoff, (unsigned long)elfp->e_shoff,
+	    (unsigned long)elfp->e_flags, elfp->e_ehsize, elfp->e_phentsize,
+	    elfp->e_phnum, elfp->e_shentsize, elfp->e_shnum, elfp->e_shstrndx);
 
 	exchg.external_resolver = __l4_external_resolver;
 	exchg.l4re_global_env  = l4re_global_env;

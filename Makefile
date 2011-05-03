@@ -5,7 +5,9 @@
 # arch/l4/boot/Makefile
 #
 
-L4_BUILDDIR = /home/cc/TU-Berlin/fiasco/l4-svn/src/l4/builddir
+#L4_BUILDDIR = /home/cc/TU-Berlin/fiasco/l4-svn/src/l4/builddir
+L4_BUILDDIR=/home/hshoexer/L4/l4re-snapshot-2011022209//obj/l4/x86
+
 
 OBJS := ldr.o startup.o res.o image.o
 L4OBJ := $(L4_BUILDDIR)

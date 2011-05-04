@@ -21,6 +21,8 @@ struct shared_data {
 	L4_CV l4_utcb_t *(*l4lx_utcb)(void);
 	void *l4re_global_env;
 	void *kip;
+	l4_addr_t ssym;
+	l4_addr_t esym;
 };
 struct shared_data exchg;
 
@@ -58,10 +60,9 @@ int main(int argc, char **argv)
 	ElfW(Ehdr) *ehdr = (void *)image_bsd_start;
 	ElfW(Ehdr) *elfp;
 	ElfW(Shdr) *shp, *shpp;
-	ElfW(Off) off;
 	l4_addr_t minp = ~0, maxp = 0, pos = 0;
 	size_t sz;
-	int i, j, havesyms;
+	int i, havesyms;
 	int (*entry)(int, char **);
 
 	if (!l4util_elf_check_magic(ehdr)
@@ -193,14 +194,14 @@ int main(int argc, char **argv)
 #define roundup(x, y)	((((x)+((y)-1))/(y))*(y))
 
 	/* Will store the ELF header at elfp. */
-	maxp = roundup(maxp, 4096/*sizeof(ElfW(Addr))*/);
+	maxp = roundup(maxp, L4_PAGESIZE);
 	elfp = (ElfW(Ehdr) *)maxp;
 	sz = ehdr->e_shnum * sizeof(ElfW(Shdr)) + sizeof(ElfW(Ehdr));
 	maxp += sizeof(ElfW(Ehdr));
 
 	shpp = (ElfW(Shdr)*)maxp;
 	maxp += sz;
-	maxp = roundup(maxp, 4096);
+	maxp = roundup(maxp, L4_PAGESIZE);
 
 	l4re_ds_t ds;
 	l4_addr_t map_addr;
@@ -224,15 +225,16 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	off = roundup((sizeof(ElfW(Ehdr)) + sz), sizeof(ElfW(Addr)));
-
 	shp = (ElfW(Shdr)*)((l4_addr_t)image_bsd_start + ehdr->e_shoff);
 	for (havesyms = i = 0; i < ehdr->e_shnum; i++) {
 		if (shp[i].sh_type == SHT_SYMTAB)
 			havesyms = 1;
 	}
 
-	for (j = i = 0; i < ehdr->e_shnum; i++) {
+	for (i = 0; i < ehdr->e_shnum; i++) {
+		/* Copy header. */
+		shpp[i] = shp[i];
+
 		if (shp[i].sh_type == SHT_SYMTAB ||
 		    shp[i].sh_type == SHT_STRTAB) {
 			if (!havesyms)
@@ -269,17 +271,14 @@ int main(int argc, char **argv)
 		memcpy((void *)maxp, (void *)((l4_addr_t)image_bsd_start +
 		    shp[i].sh_offset), shp[i].sh_size);
 
-		maxp += roundup(shp[i].sh_size, sizeof(ElfW(Addr)));
-		maxp = roundup(maxp, 4096);
-
 		/* Patch in new values. */
-		shpp[j] = shp[i];
-		shpp[j].sh_offset = off;
-		j++;
-		off += roundup(shp[i].sh_size, sizeof(ElfW(Addr)));
+		shpp[i].sh_offset = maxp - (l4_addr_t)elfp;
+
+		maxp += roundup(shp[i].sh_size, sizeof(ElfW(Addr)));
+		maxp = roundup(maxp, L4_PAGESIZE);
 	}
 
-	/* Patch ELF header. */
+	/* Patch copy of ELF header. */
 	*elfp = *ehdr;
 	elfp->e_phoff = 0;
 	elfp->e_shoff = sizeof(ElfW(Ehdr));
@@ -287,11 +286,13 @@ int main(int argc, char **argv)
 	elfp->e_phnum = 0;
 
 	printf("ELF header at %p/0x%x, %d sections headers at %p/0x%x\n",
-	    elfp, sizeof(ElfW(Ehdr)), j, shpp, j * sizeof(ElfW(Shdr)));
+	    elfp, sizeof(ElfW(Ehdr)), i, shpp, i * sizeof(ElfW(Shdr)));
 
 	exchg.external_resolver = __l4_external_resolver;
 	exchg.l4re_global_env  = l4re_global_env;
 	exchg.kip              = l4re_kip();
+	exchg.esym             = maxp;
+	exchg.ssym             = (l4_addr_t)elfp;
 	printf("External resolver is at %p\n", __l4_external_resolver);
 	entry = (void *)ehdr->e_entry;
 	printf("Starting binary at %p, argc=%d argv0=%s\n", entry, argc, *argv);

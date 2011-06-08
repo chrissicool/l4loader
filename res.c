@@ -32,9 +32,9 @@ asm(
 	"	mov 0x20(%esp), %edx\n" // edx is the symtab_ptr
 	"	mov     (%edx), %edx\n" // edx is the funcname pointer
 	"	call __C__l4_external_resolver \n"
-	"	mov %eax, 0x20(%esp) \n"
+	"	mov %eax, 0x20(%esp) \n" // return to resolved function 
 	"	popa\n"
-	"	ret $4\n" 		/* cludwig: WHY??? */
+	"	ret $4\n" 		// pop jmptblentry
    );
 #endif
 

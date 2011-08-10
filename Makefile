@@ -7,20 +7,46 @@
 
 L4_BUILDDIR = /home/cc/TU-Berlin/fiasco/l4-svn/src/l4/builddir
 
-OBJS := ldr.o startup.o res.o image.o
-L4OBJ := $(L4_BUILDDIR)
-L4_MK_ARCH = x86
-L4_MK_API  = l4f
+include $(L4_BUILDDIR)/l4defs.mk.inc
 
-# only for x86_64 aches when building x86 code
-ifeq ($(shell uname -m),x86_64)
-CC+= -m32
-LD+= -m elf_i386
+# Define target architecture
+ifeq ($(L4_SYSTEM), $(filter amd64%, $(L4_SYSTEM)))
+ARCH = amd64
+endif
+ifeq ($(L4_SYSTEM), $(filter arm%, $(L4_SYSTEM)))
+ARCH = arm
+endif
+ifeq ($(L4_SYSTEM), $(filter x86%, $(L4_SYSTEM)))
+ARCH = x86
 endif
 
-include $(L4OBJ)/l4defs.mk.inc
+ifeq ($(ARCH), amd64)
+BITS = 64
+LDFLAGS+= -m elf_x86_64
+endif
+ifeq ($(ARCH), arm)
+BITS = 32
+LDFLAGS+= -m armelf -m armelf_linux_eabi
+endif
+ifeq ($(ARCH), x86)
+BITS = 32
+LDFLAGS+= -m elf_i386
+endif
 
-L4_REQUIRED_MODS := stdlibs log l4re_c-util \
+# Shall we be verbose?
+ifneq ($(V), 1)
+Q=@
+endif
+
+OBJS := ldr.o startup.o res.o image.o
+L4OBJ := $(L4_BUILDDIR)
+L4_MK_ARCH = $(ARCH)
+L4_MK_API  = l4f
+CC = $(L4_CC)
+
+L4_REQUIRED_MODS := l4re-main libc_be_minimal_log_io \
+                    libc_minimal libsupc++_minimal \
+                    log l4re_c-util \
                     libio shmc rtc libvcpu
 
 L4_EXT_LIBS := $(call L4_BID_PKG_CONFIG_CALL,$(L4OBJ),--libs --define-variable=libc_variant=libc,$(L4_REQUIRED_MODS))
@@ -49,10 +75,12 @@ CFLAGS	:= $(NOSTDINC_FLAGS) $(CDIAGFLAGS) -DL4API_$(L4_MK_API) \
 	   -DARCH_$(L4_MK_ARCH) -g \
 	   -I. -DL4SYS_USE_UTCB_WRAP=1
 AFLAGS  := -x assembler-with-cpp -DBSD_IMAGE=\"bsd\" 
-LDFLAGS := $(LDFLAGS_i386)
 
-NORMAL_S = ${CC} ${AFLAGS} -c $<
-NORMAL_C = ${CC} ${CFLAGS} -c $<
+NORMAL_S = $(Q)${CC} ${AFLAGS} -c $<
+NORMAL_C = $(Q)${CC} ${CFLAGS} -c $<
+
+LINKADDR_32 = 0xa8000000
+LINKADDR_64 = 0x68000000
 
 all: l4bsd
 
@@ -60,8 +88,9 @@ res.o: res.c func_list.h
 	$(NORMAL_C)
 
 func_list.h: bsd
-	objcopy -j .data.l4externals.str -O binary $< $@.tmp
-	perl -p -e 's/(.+?)\0/EF($$1)\n/g' $@.tmp > $@
+	$(Q)echo 'Found original OpenBSD kernel image "$<".'
+	$(Q)objcopy -j .data.l4externals.str -O binary $< $@.tmp
+	$(Q)perl -p -e 's/(.+?)\0/EF($$1)\n/g' $@.tmp > $@
 
 image.o: image.s bsd
 	$(NORMAL_S)
@@ -76,19 +105,20 @@ bsd:
 	$(error You need to have "bsd" from your BSD kernel build directory)
 
 l4bsd: $(OBJS)
-	$(LD) $(LDFLAGS) -Bstatic -o $@ \
+	$(Q)$(LD) $(LDFLAGS) -Bstatic -o $@ \
 	  $(L4_LIBDIRS) \
 	  $(L4_CRT0_STATIC) $(OBJS) \
 	  --start-group $(L4LIBS) $(L4_GCCLIB) --end-group \
 	  $(L4_CRTN_STATIC) \
-	  -Ttext=0xa8000000 \
+	  --defsym __executable_start=$(LINKADDR_$(BITS)) \
 	  --defsym __L4_STACK_ADDR__=$(L4_BID_STACK_ADDR) \
 	  --defsym __L4_KIP_ADDR__=$(L4_BID_KIP_ADDR) \
           --defsym __l4sys_invoke_direct=$(L4_BID_KIP_ADDR)+$(L4_BID_KIP_OFFS_SYS_INVOKE) \
           --defsym __l4sys_debugger_direct=$(L4_BID_KIP_ADDR)+$(L4_BID_KIP_OFFS_SYS_DEBUGGER) \
 	  -T$(L4_LDS_stat_bin)
+	  $(Q)echo '=> OpenBSD rehosted kernel "$@" is ready.'
 
 clean:
-	rm -f l4bsd *.o func_list.h*
+	$(Q)rm -f l4bsd *.o func_list.h*
 
 .PHONY: l4bsd clean all

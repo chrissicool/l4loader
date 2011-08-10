@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/mman.h>
 
 #include <l4/util/elf.h>
 #include <l4/util/util.h>
@@ -44,6 +45,19 @@ L4_CV l4_utcb_t *l4_utcb_wrap(void)
 	return l4_utcb_direct();
 }
 
+void *mmap(void *addr, size_t length, int prot, int flags,
+           int fd, off_t offset)
+{
+	LOG_printf("mmap called, should only happen for exceptions\n");
+	return MAP_FAILED;
+}
+
+int munmap(void *addr, size_t length)
+{
+	LOG_printf("munmap called, should only happen for exceptions\n");
+	return -1;
+}
+
 
 /*
  * exit function on errors inside the VM.
@@ -61,6 +75,12 @@ void do_resolve_error(const char *funcname)
 	enter_kdebug("Symbol not found!");
 }
 
+#ifdef ARCH_amd64
+#define FMT "%016llx"
+#else
+#define FMT "%08x"
+#endif
+
 int main(int argc, char **argv)
 {
 	ElfW(Ehdr) *ehdr = (void *)image_bsd_start;
@@ -76,7 +96,7 @@ int main(int argc, char **argv)
 	printf("\033[34;1m======>  BSD/Ldr ... <========\033[0m\n");
 
 	/* some Elf debugging infos */
-	printf("Got an ELF: headersize=%08x, PHs=%08x\n",
+	printf("Got an ELF: headersize="FMT", PHs="FMT"\n",
 		ehdr->e_ehsize, ehdr->e_phnum);
 
 	for (i = 0; i < ehdr->e_phnum; ++i) {
@@ -89,8 +109,8 @@ int main(int argc, char **argv)
 
 		ElfW(Phdr) *ph = (ElfW(Phdr)*)((l4_addr_t)l4util_elf_phdr(ehdr)
 		                               + i * ehdr->e_phentsize);
-		printf("PH %2d (t: %8d) offs=%08x vaddr=%08x vend=%08x\n"
-		       "                    f_sz=%08x memsz=%08x flgs=%c%c%c\n",
+		printf("PH %2d (t: %8d) offs="FMT" vaddr="FMT" vend="FMT"\n"
+		       "                    f_sz="FMT" memsz="FMT" flgs=%c%c%c\n",
 		       i, ph->p_type, ph->p_offset, ph->p_vaddr,
 		       ph->p_vaddr + ph->p_memsz,
 		       ph->p_filesz, ph->p_memsz,
@@ -123,7 +143,10 @@ int main(int argc, char **argv)
 			if (l4re_rm_attach((void **)&map_addr,
 			                    ph->p_memsz, L4RE_RM_EAGER_MAP,
 			                    ds, 0, 0)) {
-				printf("ldr: failed attaching memory\n");
+				printf("ldr: failed attaching memory:"
+						" "FMT" - "FMT"\n",
+						ph->p_vaddr,
+						ph->p_vaddr + ph->p_memsz - 1);
 				return 1;
 			}
 #if 1
@@ -185,7 +208,8 @@ int main(int argc, char **argv)
 	exchg.kip              = l4re_kip();
 	printf("External resolver is at %p\n", __l4_external_resolver);
 	entry = (void *)ehdr->e_entry;
-	printf("Starting binary at %p, argc=%d argv0=%s\n", entry, argc, *argv);
+	printf("Starting binary at %p, argc=%d argv=%p *argv=%p argv0=%s\n",
+			entry, argc, argv, *argv, *argv);
 	/*
 	printf("Hexdump of binary: %02x %02x %02x %02x %02x\n",
 		*((char *)entry + 0), *((char *)entry + 1), *((char *)entry + 2),
@@ -207,7 +231,7 @@ int main(int argc, char **argv)
 			       "r" (_entry)
 			     : "memory");
 	}
-#else
+#elif defined(ARCH_x86)
 	asm volatile("push %[argv]\n"
 	             "push %[argc]\n"
 	             "mov  %[exchg], %%esi\n"
@@ -220,6 +244,18 @@ int main(int argc, char **argv)
 		       [exchg] "r" (&exchg),
 		       [entry] "r" (entry)
 		     : "memory");
+#elif defined(ARCH_amd64)
+	asm volatile("movq  %[exchg], %%rcx\n"
+		     "call  *%[entry]\n"
+		     : "=a" (i)
+		     : [argv] "S" (argv),
+		       [argc] "D" ((unsigned long)argc),
+		       [exchg] "r" (&exchg),
+		       [entry] "r" (entry)
+		     : "memory", "rcx");
+
+#else
+#error Please specify your arch!
 #endif
 
 	return i;

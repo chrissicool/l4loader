@@ -33,6 +33,8 @@ struct shared_data {
 	L4_CV l4_utcb_t *(*l4lx_utcb)(void);
 	void *l4re_global_env;
 	void *kip;
+	l4_addr_t ssym;
+	l4_addr_t esym;
 };
 struct shared_data exchg;
 
@@ -81,15 +83,22 @@ void do_resolve_error(const char *funcname)
 #define FMT "%08x"
 #endif
 
+/*
+ * XXX hshoexer: Aren't we leaking caps and dataspaces in error paths?
+ */
 int main(int argc, char **argv)
 {
 	ElfW(Ehdr) *ehdr = (void *)image_bsd_start;
-	int i;
+	ElfW(Ehdr) *elfp;
+	ElfW(Shdr) *shp, *shpp;
+	l4_addr_t minp = ~0, maxp = 0, pos = 0;
+	size_t sz;
+	int i, havesyms;
 	int (*entry)(int, char **);
 
 	if (!l4util_elf_check_magic(ehdr)
 	    || !l4util_elf_check_arch(ehdr)) {
-		printf("ldr: Invalid vmlinux binary (No ELF)\n");
+		printf("ldr: Invalid OpenBSD binary (No ELF)\n");
 		return 1;
 	}
 
@@ -125,6 +134,13 @@ int main(int argc, char **argv)
 			continue;
 		}
 
+		pos = ph->p_paddr;
+		if (minp > pos)
+			minp = pos;
+		pos += ph->p_filesz;
+		if (maxp < pos)
+			maxp = pos;
+		
 		if (ph->p_filesz < ph->p_memsz) {
 
 			ds = l4re_util_cap_alloc();
@@ -162,6 +178,9 @@ int main(int argc, char **argv)
 			       ph->p_filesz);
 			memset((void *)ph->p_vaddr + ph->p_filesz, 0,
 			       ph->p_memsz - ph->p_filesz);
+			pos += ph->p_memsz - ph->p_filesz;
+			if (maxp < pos)
+				maxp = pos;
 			continue;
 		}
 
@@ -203,13 +222,114 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/* 
+	 * Copy ELF and section headers.
+	 */
+#define roundup(x, y)	((((x)+((y)-1))/(y))*(y))
+
+	/* Will store the ELF header at elfp. */
+	maxp = roundup(maxp, L4_PAGESIZE);
+	elfp = (ElfW(Ehdr) *)maxp;
+	sz = ehdr->e_shnum * sizeof(ElfW(Shdr)) + sizeof(ElfW(Ehdr));
+	maxp += sizeof(ElfW(Ehdr));
+
+	shpp = (ElfW(Shdr)*)maxp;
+	maxp += sz;
+	maxp = roundup(maxp, L4_PAGESIZE);
+
+	l4re_ds_t ds;
+	l4_addr_t map_addr;
+
+	/* Create chunk of memory for section headers. */
+	ds = l4re_util_cap_alloc();
+	if (l4_is_invalid_cap(ds)) {
+		printf("ldr: out of caps\n");
+		return 1;
+	}
+
+	if (l4re_ma_alloc(sz, ds, L4RE_MA_CONTINUOUS | L4RE_MA_PINNED)) {
+		printf("ldr: could not allocate memory\n");
+		return 1;
+	}
+
+	map_addr = (l4_addr_t)shpp;
+	if ((i = l4re_rm_attach((void **)&map_addr, sz,  L4RE_RM_EAGER_MAP, ds,
+	    0, 0)) != 0) {
+		printf("ldr: failed attaching memory %d\n", i);
+		return 1;
+	}
+
+	shp = (ElfW(Shdr)*)((l4_addr_t)image_bsd_start + ehdr->e_shoff);
+	for (havesyms = i = 0; i < ehdr->e_shnum; i++) {
+		if (shp[i].sh_type == SHT_SYMTAB)
+			havesyms = 1;
+	}
+
+	for (i = 0; i < ehdr->e_shnum; i++) {
+		/* Copy header. */
+		shpp[i] = shp[i];
+
+		if (shp[i].sh_type == SHT_SYMTAB ||
+		    shp[i].sh_type == SHT_STRTAB) {
+			if (!havesyms)
+				continue;
+
+			printf("Loading section \"%s\" to 0x%lx/0x%lx\n",
+			    shp[i].sh_type == SHT_SYMTAB ? "symbols" :
+			    "strings", (unsigned long)maxp,
+			    (unsigned long)shp[i].sh_size);
+		} else
+			continue;
+
+		/* Create chunk of memory at maxp. */
+		ds = l4re_util_cap_alloc();
+		if (l4_is_invalid_cap(ds)) {
+			printf("ldr: out of caps\n");
+			return 1;
+		}
+
+		if (l4re_ma_alloc(shp[i].sh_size, ds,
+		    L4RE_MA_CONTINUOUS | L4RE_MA_PINNED)) {
+			printf("ldr: could not allocate memory\n");
+			return 1;
+		}
+
+		map_addr = maxp;
+		if (l4re_rm_attach((void **)&map_addr, shp[i].sh_size,
+		    L4RE_RM_EAGER_MAP, ds, 0, 0)) {
+			printf("ldr: failed attaching memory\n");
+			return 1;
+		}
+
+		/* Pull in section. */
+		memcpy((void *)maxp, (void *)((l4_addr_t)image_bsd_start +
+		    shp[i].sh_offset), shp[i].sh_size);
+
+		/* Patch in new values. */
+		shpp[i].sh_offset = maxp - (l4_addr_t)elfp;
+
+		maxp += roundup(shp[i].sh_size, sizeof(ElfW(Addr)));
+		maxp = roundup(maxp, L4_PAGESIZE);
+	}
+
+	/* Patch copy of ELF header. */
+	*elfp = *ehdr;
+	elfp->e_phoff = 0;
+	elfp->e_shoff = sizeof(ElfW(Ehdr));
+	elfp->e_phentsize = 0;
+	elfp->e_phnum = 0;
+
+	printf("ELF header at %p/0x%x, %d sections headers at %p/0x%x\n",
+	    elfp, sizeof(ElfW(Ehdr)), i, shpp, i * sizeof(ElfW(Shdr)));
+
 	exchg.external_resolver = __l4_external_resolver;
 	exchg.l4re_global_env  = l4re_global_env;
 	exchg.kip              = l4re_kip();
+	exchg.esym             = maxp;
+	exchg.ssym             = (l4_addr_t)elfp;
 	printf("External resolver is at %p\n", __l4_external_resolver);
 	entry = (void *)ehdr->e_entry;
-	printf("Starting binary at %p, argc=%d argv=%p *argv=%p argv0=%s\n",
-			entry, argc, argv, *argv, *argv);
+	printf("Starting binary at %p, argc=%d argv0=%s\n", entry, argc, *argv);
 	/*
 	printf("Hexdump of binary: %02x %02x %02x %02x %02x\n",
 		*((char *)entry + 0), *((char *)entry + 1), *((char *)entry + 2),
